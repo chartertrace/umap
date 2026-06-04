@@ -312,7 +312,7 @@ func OptimizeLayout(
 
 	// Initialize base random state
 	var baseRNG rand.State
-	if config.RNGState != nil && len(config.RNGState) >= 3 {
+	if len(config.RNGState) >= 3 {
 		baseRNG = rand.State{config.RNGState[0], config.RNGState[1], config.RNGState[2]}
 	} else {
 		baseRNG = rand.New(config.Seed)
@@ -467,69 +467,6 @@ func processEdgePython(
 
 	// Update next negative sample time
 	epochOfNextNegSample[edge] += float32(nNegSamples) * epochsPerNegSample[edge]
-}
-
-// applyAttractive applies attractive force between points i and j.
-func applyAttractive(embedding [][]float32, i, j, dim int, a, b, alpha, moveOther float32) {
-	// Compute squared distance
-	var distSq float32
-	for d := range dim {
-		diff := embedding[i][d] - embedding[j][d]
-		distSq += diff * diff
-	}
-
-	if distSq < 1e-10 {
-		distSq = 1e-10
-	}
-
-	// Gradient of attractive force
-	// grad = -2ab * d^(2b-2) / (1 + a*d^(2b))
-	gradCoef := float32(0)
-	if distSq > 0 {
-		d2b := pow32(distSq, b)
-		gradCoef = (-2.0 * a * b * pow32(distSq, b-1)) / (1.0 + a*d2b)
-	}
-
-	// Apply gradient with clipping
-	for d := range dim {
-		diff := embedding[i][d] - embedding[j][d]
-		grad := clip(gradCoef * diff)
-
-		embedding[i][d] += alpha * grad
-		if moveOther > 0 {
-			embedding[j][d] -= alpha * grad * moveOther
-		}
-	}
-}
-
-// applyRepulsive applies repulsive force between points i and k.
-func applyRepulsive(embedding [][]float32, i, k, dim int, a, b, alpha float32) {
-	// Compute squared distance
-	var distSq float32
-	for d := range dim {
-		diff := embedding[i][d] - embedding[k][d]
-		distSq += diff * diff
-	}
-
-	if distSq < 1e-10 {
-		distSq = 1e-10
-	}
-
-	// Gradient of repulsive force
-	// grad = 2b / (d^2 * (1 + a*d^(2b)))
-	gradCoef := float32(0)
-	if distSq > 0 {
-		d2b := pow32(distSq, b)
-		gradCoef = (2.0 * b) / ((0.001 + distSq) * (1.0 + a*d2b))
-	}
-
-	// Apply gradient with clipping
-	for d := range dim {
-		diff := embedding[i][d] - embedding[k][d]
-		grad := clip(gradCoef * diff)
-
-		embedding[i][d] += alpha * grad
-	}
 }
 
 // clip clamps a value to [-4, 4] range.

@@ -5,6 +5,17 @@ import (
 	"testing"
 )
 
+// euclideanDist returns the squared Euclidean distance between two vectors.
+// Squared distance is sufficient for the relative comparisons made in tests.
+func euclideanDist(a, b []float32) float32 {
+	var sum float32
+	for i := range a {
+		diff := a[i] - b[i]
+		sum += diff * diff
+	}
+	return sum
+}
+
 // generateBlobs generates n clusters of points for testing.
 func generateBlobs(nSamples, nClusters, nFeatures int, seed int64) [][]float32 {
 	data := make([][]float32, nSamples)

@@ -14,6 +14,7 @@
 package umap
 
 import (
+	"github.com/nozzle/umap/distance"
 	"github.com/nozzle/umap/graph"
 	umapinit "github.com/nozzle/umap/init"
 	"github.com/nozzle/umap/internal/rand"
@@ -121,6 +122,7 @@ type UMAP struct {
 	graph     *graph.CSRMatrix
 	embedding [][]float32
 	knnGraph  *nn.KNNGraph
+	data      [][]float32 // training data, retained for Transform
 }
 
 // New creates a new UMAP model with the given configuration.
@@ -140,6 +142,9 @@ func (u *UMAP) Fit(data [][]float32) {
 	if n == 0 {
 		return
 	}
+
+	// Retain training data so Transform can project new points against it.
+	u.data = data
 
 	// Determine number of epochs based on dataset size
 	nEpochs := u.Config.NEpochs
@@ -174,38 +179,66 @@ func (u *UMAP) Fit(data [][]float32) {
 	u.optimizeLayoutWithRNGState(nEpochs, rngState)
 }
 
-// Transform transforms new data using the fitted model.
-// Note: This is a simplified implementation that uses nearest neighbor lookup.
+// Transform projects new, unseen data into the embedding space learned by Fit.
+//
+// Each new point is placed at the distance-weighted mean of its nearest
+// neighbours among the training points, using the model's configured metric.
+// This is a lightweight out-of-sample extension: it is deterministic and
+// requires no further optimisation, but it cannot move points outside the
+// convex hull of the training embedding. Transform returns nil if the model
+// has not been fitted or if newData is empty.
 func (u *UMAP) Transform(newData [][]float32) [][]float32 {
-	if len(u.embedding) == 0 {
+	if len(u.embedding) == 0 || len(u.data) == 0 || len(newData) == 0 {
 		return nil
 	}
 
-	// For now, use a simple nearest-neighbor approach
-	// A full implementation would use out-of-sample extension
-	n := len(newData)
-	result := make([][]float32, n)
-
-	for i := range n {
-		result[i] = make([]float32, u.Config.NComponents)
-
-		// Find nearest neighbor in training data and copy its embedding
-		// This is a placeholder - proper implementation would do interpolation
-		bestDist := float32(1e30)
-		bestIdx := 0
-
-		for j := 0; j < len(u.knnGraph.Indices); j++ {
-			dist := euclideanDist(newData[i], getData(u.knnGraph, j))
-			if dist < bestDist {
-				bestDist = dist
-				bestIdx = j
-			}
-		}
-
-		copy(result[i], u.embedding[bestIdx])
+	distFunc, ok := distance.Get(u.Config.Metric)
+	if !ok {
+		distFunc = distance.Euclidean
 	}
 
+	k := u.Config.NNeighbors
+	if k > len(u.data) {
+		k = len(u.data)
+	}
+
+	result := make([][]float32, len(newData))
+	for i := range newData {
+		result[i] = u.transformPoint(newData[i], distFunc, k)
+	}
 	return result
+}
+
+// transformPoint embeds a single query point as the inverse-distance-weighted
+// mean of its k nearest training neighbours.
+func (u *UMAP) transformPoint(query []float32, distFunc distance.Func, k int) []float32 {
+	// Find the k nearest training points by metric distance.
+	nbrIdx, nbrDist := nn.NearestK(u.data, query, k, distFunc)
+
+	out := make([]float32, u.Config.NComponents)
+
+	// Exact hit on a training point: copy its embedding directly.
+	if len(nbrDist) > 0 && nbrDist[0] == 0 {
+		copy(out, u.embedding[nbrIdx[0]])
+		return out
+	}
+
+	var weightSum float32
+	for n, idx := range nbrIdx {
+		// Inverse-distance weighting with a small epsilon for stability.
+		w := 1.0 / (nbrDist[n] + 1e-6)
+		weightSum += w
+		emb := u.embedding[idx]
+		for d := range out {
+			out[d] += w * emb[d]
+		}
+	}
+	if weightSum > 0 {
+		for d := range out {
+			out[d] /= weightSum
+		}
+	}
+	return out
 }
 
 // Embedding returns the current embedding.
@@ -243,27 +276,6 @@ func (u *UMAP) buildFuzzySimplicialSet() *graph.CSRMatrix {
 		u.knnGraph.Indices,
 		u.knnGraph.Distances,
 		config,
-	)
-}
-
-// initializeEmbedding creates the initial embedding.
-func (u *UMAP) initializeEmbedding(n int) [][]float32 {
-	var method umapinit.InitMethod
-	switch u.Config.Init {
-	case "spectral":
-		method = umapinit.Spectral
-	case "random":
-		method = umapinit.Random
-	default:
-		method = umapinit.Spectral
-	}
-
-	return umapinit.InitializeEmbedding(
-		u.graph,
-		n,
-		u.Config.NComponents,
-		method,
-		u.Config.Seed,
 	)
 }
 
@@ -307,22 +319,6 @@ func randomEmbeddingWithMT(n, dim int, mt *rand.MT19937) [][]float32 {
 	return result
 }
 
-// optimizeLayout runs the SGD optimization.
-func (u *UMAP) optimizeLayout(nEpochs int) {
-	config := layout.DefaultLayoutConfig()
-	config.MinDist = u.Config.MinDist
-	config.Spread = u.Config.Spread
-	config.NEpochs = nEpochs
-	config.LearningRate = u.Config.LearningRate
-	config.NegativeSampleRate = u.Config.NegativeSampleRate
-	config.Seed = u.Config.Seed
-	config.NumWorkers = u.Config.NumWorkers
-	config.Verbose = u.Config.Verbose
-	config.ProgressCallback = u.Config.ProgressCallback
-
-	layout.OptimizeLayout(u.embedding, u.graph, config)
-}
-
 // optimizeLayoutWithRNGState runs the SGD optimization with a specific RNG state.
 // This allows for exact reproducibility matching Python UMAP.
 func (u *UMAP) optimizeLayoutWithRNGState(nEpochs int, rngState []int64) {
@@ -339,21 +335,4 @@ func (u *UMAP) optimizeLayoutWithRNGState(nEpochs int, rngState []int64) {
 	config.RNGState = rngState
 
 	layout.OptimizeLayout(u.embedding, u.graph, config)
-}
-
-// euclideanDist computes Euclidean distance between two vectors.
-func euclideanDist(a, b []float32) float32 {
-	var sum float32
-	for i := range a {
-		diff := a[i] - b[i]
-		sum += diff * diff
-	}
-	return sum // Return squared distance for efficiency
-}
-
-// getData is a placeholder - in a real implementation we'd store the original data
-func getData(g *nn.KNNGraph, idx int) []float32 {
-	// This is a placeholder. For proper Transform support,
-	// we would need to store the original training data.
-	return nil
 }

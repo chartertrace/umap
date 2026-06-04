@@ -312,6 +312,33 @@ func sampleCandidates(candidates []int32, rho float32, rng *rand.State) []int32 
 	return candidates[:targetSize]
 }
 
+// NearestK returns the indices and distances of the k points in data closest
+// to query under distFunc, sorted nearest-first. It is a single-query brute
+// force search intended for projecting out-of-sample points; for whole-dataset
+// graph construction use BruteForceKNN or NNDescent instead.
+func NearestK(data [][]float32, query []float32, k int, distFunc distance.Func) ([]int32, []float32) {
+	n := len(data)
+	if k > n {
+		k = n
+	}
+	if k <= 0 {
+		return nil, nil
+	}
+
+	idx := make([]int32, k)
+	dist := make([]float32, k)
+	for i := range idx {
+		idx[i] = -1
+		dist[i] = 1e30
+	}
+
+	for j := range data {
+		heap.SimpleHeapPush(idx, dist, k, int32(j), distFunc(query, data[j]))
+	}
+	heap.DeheapSort(idx, dist, k)
+	return idx, dist
+}
+
 // BruteForceKNN computes exact k-NN using brute force.
 // This is used for small datasets or as a fallback.
 // Note: k includes self as the first neighbor (distance 0) to match Python sklearn behavior.
